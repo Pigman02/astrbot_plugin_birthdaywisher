@@ -10,7 +10,7 @@ from astrbot.api.message_components import At, Plain
 
 DATA_FILE = "birthday_data.json"
 
-@register("astrbot_plugin_birthday", "Zhalslar_Assistant", "智能生日纪念日祝福", "1.6.1")
+@register("astrbot_plugin_birthday", "Zhalslar_Assistant", "智能生日纪念日祝福", "1.6.2")
 class BirthdayPlugin(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
@@ -80,41 +80,33 @@ class BirthdayPlugin(Star):
             return None
 
     async def _get_system_prompt(self, group_id):
-        """获取群组人设 (防御性版)"""
+        """获取群组人设"""
         try:
-            # UMO 必须使用大写 GROUP_MESSAGE
-            umo = f"aiocqhttp:GROUP_MESSAGE:{group_id}"
+            # [修正点1] 使用 'group' 而不是 'GROUP_MESSAGE'
+            umo = f"aiocqhttp:group:{group_id}"
+            
             persona = await self.context.persona_manager.get_default_persona_v3(umo)
+            if not persona: return ""
             
-            if not persona:
-                return ""
-            
-            # 兼容对象和字典
-            if hasattr(persona, "system_prompt"):
-                return persona.system_prompt
             if isinstance(persona, dict):
                 return persona.get("system_prompt", "")
-            return ""
-            
+            return getattr(persona, "system_prompt", "")
         except Exception as e:
-            logger.error(f"[Birthday] Get persona error: {e}")
+            logger.warning(f"[Birthday] Get persona failed: {e}")
             return ""
 
     async def _send_to_platform(self, group_id, chain):
-        """
-        [关键修复] 使用大写 GROUP_MESSAGE
-        """
         try:
             platform = self.context.get_platform("aiocqhttp")
             if not platform: return
 
             meta = platform.meta
             if callable(meta): meta = meta()
-            
             p_name = getattr(meta, "name", "aiocqhttp")
             
-            # [Fix]: 这里的 MessageType 必须是大写 GROUP_MESSAGE
-            target_umo = f"{p_name}:GROUP_MESSAGE:{group_id}"
+            # [修正点2] 核心修复：中间必须是 'group' (OneBot协议标准)
+            # 之前的 group_message 和 GROUP_MESSAGE 都是错的
+            target_umo = f"{p_name}:group:{group_id}"
             
             await self.context.send_message(target_umo, chain)
             
@@ -163,6 +155,9 @@ class BirthdayPlugin(Star):
 
     @bd.command("add")
     async def add_birthday(self, event: AstrMessageEvent, date: str = None, user_id: str = None, group_id: str = None):
+        # [调试日志] 打印当前 UMO 格式，用于确认系统标准
+        logger.debug(f"[Birthday] Debug UMO: {event.unified_msg_origin}")
+
         tid = user_id if user_id else event.get_sender_id()
         tname = user_id if user_id else event.get_sender_name()
         tgid = group_id if group_id else event.get_group_id()
