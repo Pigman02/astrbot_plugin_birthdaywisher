@@ -10,7 +10,7 @@ from astrbot.api.message_components import At, Plain
 
 DATA_FILE = "birthday_data.json"
 
-@register("astrbot_plugin_birthday", "Zhalslar_Assistant", "智能生日纪念日祝福", "1.5.2")
+@register("astrbot_plugin_birthday", "Zhalslar_Assistant", "智能生日纪念日祝福", "1.6.0")
 class BirthdayPlugin(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
@@ -70,10 +70,9 @@ class BirthdayPlugin(Star):
         })
         self._save_data()
 
-    # ================== 辅助函数 (API & Persona & Platform) ==================
+    # ================== 辅助函数 (防御性极强版) ==================
     
     async def _get_stranger_info(self, client, user_id):
-        """标准化调用 QQ API"""
         try:
             return await client.api.call_action('get_stranger_info', user_id=int(user_id), no_cache=True)
         except Exception as e:
@@ -81,43 +80,47 @@ class BirthdayPlugin(Star):
             return None
 
     async def _get_system_prompt(self, group_id):
-        """获取群组人设 (安全版)"""
+        """
+        [调试版] 获取群组人设
+        强制打印类型，绝对防止报错
+        """
         try:
             umo = f"aiocqhttp:group_message:{group_id}"
             persona = await self.context.persona_manager.get_default_persona_v3(umo)
-            if not persona: return ""
             
-            # 兼容对象和字典
+            if not persona:
+                return ""
+            
+            # --- DEBUG LOG: 看看这到底是个什么东西 ---
+            logger.debug(f"[Birthday] Persona Type: {type(persona)}")
+            logger.debug(f"[Birthday] Persona Content: {persona}")
+            # ---------------------------------------
+
+            # 1. 优先尝试作为属性访问 (Object)
+            if hasattr(persona, "system_prompt"):
+                return persona.system_prompt
+            
+            # 2. 尝试作为字典访问 (Dict)
             if isinstance(persona, dict):
                 return persona.get("system_prompt", "")
-            return getattr(persona, "system_prompt", "")
+            
+            # 3. 如果都不是，返回空字符串，防止报错
+            logger.warning(f"[Birthday] Persona object is neither Dict nor Object with system_prompt!")
+            return ""
+            
         except Exception as e:
-            logger.warning(f"[Birthday] Get persona failed: {e}")
+            logger.error(f"[Birthday] Get persona FATAL error: {e}")
             return ""
 
     async def _send_to_platform(self, group_id, chain):
-        """
-        [关键修复] 发送消息辅助函数
-        使用 get_platform 替代遍历，并处理 meta 为函数的情况
-        """
         try:
-            # 1. 直接获取 aiocqhttp 平台实例 (比遍历更安全)
             platform = self.context.get_platform("aiocqhttp")
-            
-            if not platform:
-                logger.warning("[Birthday] AIOCQHTTP platform not found/active.")
-                return
+            if not platform: return
 
-            # 2. 获取元数据 (防御性处理)
             meta = platform.meta
-            if callable(meta): # 如果是方法，则调用它
-                meta = meta()
+            if callable(meta): meta = meta()
             
-            # 3. 获取平台名称
-            # 优先取 name 属性，取不到则默认为 aiocqhttp
             p_name = getattr(meta, "name", "aiocqhttp")
-            
-            # 4. 构造 UMO 并发送
             target_umo = f"{p_name}:group_message:{group_id}"
             await self.context.send_message(target_umo, chain)
             
@@ -133,7 +136,6 @@ class BirthdayPlugin(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @bd.command("scan")
     async def scan_group(self, event: AstrMessageEvent, group_id: str = None):
-        """管理员扫描"""
         if not isinstance(event, AiocqhttpMessageEvent):
             yield event.plain_result("❌ 仅支持 QQ (Aiocqhttp)。")
             return
@@ -167,7 +169,6 @@ class BirthdayPlugin(Star):
 
     @bd.command("add")
     async def add_birthday(self, event: AstrMessageEvent, date: str = None, user_id: str = None, group_id: str = None):
-        """添加生日"""
         tid = user_id if user_id else event.get_sender_id()
         tname = user_id if user_id else event.get_sender_name()
         tgid = group_id if group_id else event.get_group_id()
@@ -176,7 +177,6 @@ class BirthdayPlugin(Star):
             yield event.plain_result("❌ 未知群号。")
             return
 
-        # 自动获取
         if not date:
             if not isinstance(event, AiocqhttpMessageEvent):
                 yield event.plain_result("仅支持QQ自动获取。")
@@ -193,7 +193,6 @@ class BirthdayPlugin(Star):
                 yield event.plain_result("⚠️ 获取失败，请手动输入: /bd add 01-01")
             return
 
-        # 手动输入
         try:
             datetime.datetime.strptime(date, "%m-%d")
             self._add_birthday_record(tid, tgid, date, tname)
@@ -203,7 +202,6 @@ class BirthdayPlugin(Star):
 
     @bd.command("del")
     async def del_birthday(self, event: AstrMessageEvent):
-        """删除记录"""
         uid = event.get_sender_id()
         gid = event.get_group_id()
         if not gid: return
@@ -219,7 +217,6 @@ class BirthdayPlugin(Star):
 
     @bd.command("add_ann")
     async def add_ann(self, event: AstrMessageEvent, date: str, name: str, desc: str = ""):
-        """添加纪念日"""
         try:
             datetime.datetime.strptime(date, "%m-%d")
             gid = event.get_group_id()
@@ -234,7 +231,6 @@ class BirthdayPlugin(Star):
 
     @bd.command("list")
     async def list_all(self, event: AstrMessageEvent):
-        """查看列表"""
         gid = event.get_group_id()
         if not gid: return
         if gid not in self.config.get("group_whitelist", []):
@@ -252,15 +248,11 @@ class BirthdayPlugin(Star):
 
     @bd.command("test")
     async def test_blessing(self, event: AstrMessageEvent, type: str = "bd"):
-        """测试"""
         gid = event.get_group_id()
         if not gid: return
         
         yield event.plain_result(f"🚀 测试 {type} 祝福...")
         provider = self.context.get_using_provider()
-        if not provider:
-            yield event.plain_result("❌ 无可用 LLM。")
-            return
         
         if type == "ann":
             await self._send_anniversary(provider, {"group_id": gid, "date": "01-01", "name": "测试日", "desc": "测试"})
