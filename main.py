@@ -5,18 +5,16 @@ import datetime
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register, StarTools
 from astrbot.api import logger
-# 导入消息组件，用于手动构建协议包
 from astrbot.api.message_components import At, Plain
 
 DATA_FILE = "birthday_data.json"
 
-@register("astrbot_plugin_birthday", "Zhalslar_Assistant", "智能生日纪念日祝福", "1.7.1")
+@register("astrbot_plugin_birthday", "Zhalslar_Assistant", "智能生日纪念日祝福", "1.9.0")
 class BirthdayPlugin(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
         self.config = config
         
-        # 数据持久化
         self.data_dir = StarTools.get_data_dir("astrbot_plugin_birthday")
         self.data_path = self.data_dir / DATA_FILE
         self.data = self._load_data()
@@ -25,7 +23,6 @@ class BirthdayPlugin(Star):
         self._task = asyncio.create_task(self._scheduler_loop())
 
     async def terminate(self):
-        """插件卸载清理逻辑"""
         logger.info("[BirthdayPlugin] Terminating...")
         if self._task and not self._task.done():
             self._task.cancel()
@@ -70,90 +67,83 @@ class BirthdayPlugin(Star):
         })
         self._save_data()
 
-    # ================== 核心：API 与 发送逻辑 ==================
+    # ================== 核心 API & 人设逻辑 ==================
     
     async def _get_stranger_info(self, client, user_id):
-        """调用 QQ API 获取信息"""
         try:
             return await client.api.call_action('get_stranger_info', user_id=int(user_id), no_cache=True)
         except Exception as e:
-            logger.warning(f"[Birthday] API Error: {e}")
+            logger.warning(f"[Birthday] API info error: {e}")
             return None
 
     async def _get_system_prompt(self, group_id):
         """
-        获取人设。这里构造 UMO 仅用于查询配置，即使格式不对 AstrBot 通常也会返回默认值，
-        不会像发送消息那样抛出致命错误。
+        [回归功能] 获取当前群的人设
+        尝试多种 UMO 格式以确保兼容性
         """
         try:
-            # 尝试最常见的格式，仅用于读取配置
-            umo = f"aiocqhttp:GroupMessage:{group_id}" 
-            persona = await self.context.persona_manager.get_default_persona_v3(umo)
-            if not persona: return ""
+            # 尝试格式 1: 标准 Enum 名称
+            umo_1 = f"aiocqhttp:GROUP_MESSAGE:{group_id}"
+            persona = await self.context.persona_manager.get_default_persona_v3(umo_1)
             
+            # 尝试格式 2: 协议原始字段 (如果1失败)
+            if not persona:
+                umo_2 = f"aiocqhttp:group:{group_id}"
+                persona = await self.context.persona_manager.get_default_persona_v3(umo_2)
+
+            if not persona:
+                return ""
+
+            # 安全获取属性
             if isinstance(persona, dict):
-                return persona.get("system_prompt", "")
-            return getattr(persona, "system_prompt", "")
+                sp = persona.get("system_prompt", "")
+            else:
+                sp = getattr(persona, "system_prompt", "")
+            
+            if sp:
+                logger.info(f"[Birthday] Loaded Persona for group {group_id}")
+            return sp
+
         except Exception as e:
-            logger.warning(f"[Birthday] Get persona warning: {e}")
+            # 仅打印警告，不影响后续发送
+            logger.warning(f"[Birthday] Load Persona failed (ignored): {e}")
             return ""
 
     async def _send_to_platform(self, group_id, chain):
-        """
-        [彻底修复] 直接调用 OneBot 协议的 send_group_msg 接口
-        完全绕过 AstrBot 的 Unified Message Origin 解析逻辑，避免所有 MessageType 报错。
-        """
+        """直接调用 OneBot API 发送消息"""
         try:
-            # 1. 获取 aiocqhttp 平台实例
             platform = self.context.get_platform("aiocqhttp")
-            if not platform:
-                logger.error("[Birthday] AIOCQHTTP platform not found. Cannot send message.")
-                return
+            if not platform: return
 
-            # 2. 将 AstrBot 的消息链转换为 OneBot 协议的 JSON 数组
-            # 这一步是必须的，因为底层 API 只认 JSON
             message_payload = []
             for item in chain:
                 if isinstance(item, At):
-                    message_payload.append({
-                        "type": "at",
-                        "data": {"qq": item.qq}
-                    })
-                elif isinstance(item, Plain):
-                    # 过滤掉纯空白文本，避免发送空消息
-                    if item.text:
-                        message_payload.append({
-                            "type": "text",
-                            "data": {"text": item.text}
-                        })
+                    message_payload.append({"type": "at", "data": {"qq": item.qq}})
+                elif isinstance(item, Plain) and item.text:
+                    message_payload.append({"type": "text", "data": {"text": item.text}})
             
-            if not message_payload:
-                return
+            if not message_payload: return
 
-            # 3. 直接调用底层 API
-            logger.info(f"[Birthday] Direct sending to group {group_id} via API")
             await platform.bot.api.call_action(
                 "send_group_msg",
                 group_id=int(group_id),
                 message=message_payload
             )
-            
         except Exception as e:
-            logger.error(f"[Birthday] Fatal Send Error: {e}")
+            logger.error(f"[Birthday] Send API error: {e}")
 
-    # ================== LLM Tools (保留功能) ==================
+    # ================== LLM Tools ==================
 
     @filter.llm_tool(name="record_birthday")
     async def record_birthday_tool(self, event: AstrMessageEvent, name: str, date: str, target_qq: str = None):
-        """记录群友生日"""
         group_id = event.get_group_id()
         if not group_id:
-            yield event.plain_result("请在群聊中使用。")
+            yield event.plain_result("请在群聊使用。")
             return
         try:
             datetime.datetime.strptime(date, "%m-%d")
         except ValueError:
-            yield event.plain_result(f"日期格式错误({date})。")
+            yield event.plain_result(f"日期格式错({date})。")
             return
         
         user_id = target_qq
@@ -161,22 +151,21 @@ class BirthdayPlugin(Star):
             if "我" in name or name == event.get_sender_name():
                 user_id = event.get_sender_id()
             else:
-                yield event.plain_result(f"请提供QQ号。")
+                yield event.plain_result("需提供QQ号。")
                 return
 
         self._add_birthday_record(user_id, group_id, date, name)
-        yield event.plain_result(f"✅ 已记录 {name} 的生日 {date}！")
+        yield event.plain_result(f"✅ 已记录 {name} 生日 {date}。")
 
     @filter.llm_tool(name="list_birthdays")
     async def list_birthdays_tool(self, event: AstrMessageEvent):
-        """列出本群生日"""
-        group_id = event.get_group_id()
-        if not group_id: return
-        msg = ["📅 本群生日清单:"]
+        gid = event.get_group_id()
+        if not gid: return
+        msg = ["📅 列表:"]
         for bd in self.data["birthdays"]:
-            if bd["group_id"] == group_id:
-                msg.append(f"{bd['date']} - {bd['name']}")
-        yield event.plain_result("\n".join(msg) if len(msg) > 1 else "暂无记录")
+            if bd["group_id"] == gid:
+                msg.append(f"{bd['date']} {bd['name']}")
+        yield event.plain_result("\n".join(msg) if len(msg) > 1 else "空")
 
     # ================== 指令处理 ==================
     
@@ -187,7 +176,8 @@ class BirthdayPlugin(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @bd.command("scan")
     async def scan_group(self, event: AstrMessageEvent, group_id: str = None):
-        if not isinstance(event, AiocqhttpMessageEvent):
+        """扫描群成员"""
+        if event.get_platform_name() != "aiocqhttp":
             yield event.plain_result("❌ 仅支持 QQ。")
             return
 
@@ -196,8 +186,7 @@ class BirthdayPlugin(Star):
             yield event.plain_result("❌ 请指定群号。")
             return
 
-        interval = self.config.get("scan_interval", 3.0)
-        yield event.plain_result(f"⏳ 开始扫描群 {target_group}...")
+        yield event.plain_result(f"⏳ 扫描群 {target_group}...")
         
         client = event.bot
         count = 0
@@ -212,13 +201,19 @@ class BirthdayPlugin(Star):
                     m, d = info["birthday_month"], info["birthday_day"]
                     self._add_birthday_record(uid, str(target_group), f"{m:02d}-{d:02d}", nick)
                     count += 1
-                await asyncio.sleep(interval)
-            yield event.plain_result(f"✅ 扫描结束，更新 {count} 人。")
+                
+                await asyncio.sleep(self.config.get("scan_interval", 3.0))
+            
+            yield event.plain_result(f"✅ 扫描完成，更新 {count} 人。")
         except Exception as e:
-            yield event.plain_result(f"❌ 错误: {e}")
+            yield event.plain_result(f"❌ 扫描错误: {e}")
 
     @bd.command("add")
     async def add_birthday(self, event: AstrMessageEvent, date: str = None, user_id: str = None, group_id: str = None):
+        if event.get_platform_name() != "aiocqhttp":
+            yield event.plain_result("仅支持 QQ。")
+            return
+
         tid = user_id if user_id else event.get_sender_id()
         tname = user_id if user_id else event.get_sender_name()
         tgid = group_id if group_id else event.get_group_id()
@@ -228,19 +223,15 @@ class BirthdayPlugin(Star):
             return
 
         if not date:
-            if not isinstance(event, AiocqhttpMessageEvent):
-                yield event.plain_result("仅支持QQ。")
-                return
-            
             info = await self._get_stranger_info(event.bot, tid)
             if info and info.get("birthday_month"):
                 m, d = info["birthday_month"], info["birthday_day"]
                 ds = f"{m:02d}-{d:02d}"
                 real_name = info.get('nickname', tname)
                 self._add_birthday_record(tid, tgid, ds, real_name)
-                yield event.plain_result(f"🎉 已记录 {real_name}: {ds}")
+                yield event.plain_result(f"🎉 已获取 {real_name} 生日: {ds}")
             else:
-                yield event.plain_result("⚠️ 获取失败，请手动输入。")
+                yield event.plain_result("⚠️ 获取失败，请手动输入: /bd add 01-01")
             return
 
         try:
@@ -283,8 +274,9 @@ class BirthdayPlugin(Star):
     async def list_all(self, event: AstrMessageEvent):
         gid = event.get_group_id()
         if not gid: return
+        
         if gid not in self.config.get("group_whitelist", []):
-            yield event.plain_result("⚠️ 本群未在白名单。")
+            yield event.plain_result("⚠️ 本群未在 WebUI 白名单中。")
             return
 
         msg = ["📅 清单:"]
@@ -312,7 +304,7 @@ class BirthdayPlugin(Star):
         else:
             await self._send_batch_birthday(provider, gid, [{"user_id": event.get_sender_id(), "name": event.get_sender_name(), "date": "01-01"}])
 
-    # ================== 定时与发送 ==================
+    # ================== 定时任务 ==================
 
     async def _scheduler_loop(self):
         logger.info("[Birthday] Task started.")
@@ -356,6 +348,7 @@ class BirthdayPlugin(Star):
             prompt = tmpl.replace("{date}", user_list[0]["date"]).replace("{name}", names)
             if len(user_list) > 1: prompt += "\n(注: 多人同一天生日)"
 
+            # [恢复] 获取人设
             sys_prompt = await self._get_system_prompt(group_id)
             
             resp = await provider.text_chat(prompt=prompt, system_prompt=sys_prompt, session_id=None)
@@ -366,7 +359,6 @@ class BirthdayPlugin(Star):
                 chain.append(Plain("\n"))
             chain.append(Plain(resp.completion_text))
             
-            # 使用新的 direct API sender
             await self._send_to_platform(group_id, chain)
         except Exception as e:
             logger.error(f"[Birthday] Batch error: {e}")
@@ -377,11 +369,10 @@ class BirthdayPlugin(Star):
             desc = data.get("desc", "")
             prompt = f"{'描述:'+desc if desc else ''}\n{base_tmpl}".replace("{date}", data["date"]).replace("{event_name}", data["name"])
             
+            # [恢复] 获取人设
             sys_prompt = await self._get_system_prompt(data["group_id"])
             
             resp = await provider.text_chat(prompt=prompt, system_prompt=sys_prompt, session_id=None)
-            
-            # 使用新的 direct API sender
             await self._send_to_platform(data["group_id"], [Plain(resp.completion_text)])
         except Exception as e:
             logger.error(f"[Birthday] Ann error: {e}")
