@@ -1,0 +1,48 @@
+{
+  "check_time": {
+    "type": "string",
+    "description": "每天自动检查并发送祝福的时间 (24小时制)",
+    "default": "08:00",
+    "hint": "例如 08:00, 00:01"
+  },
+  "at_target": {
+    "type": "bool",
+    "description": "发送生日祝福时是否 @ 寿星",
+    "default": true,
+    "hint": "开启后消息会以 @用户 开头，关闭则只发文本"
+  },
+  "group_whitelist": {
+    "type": "list",
+    "description": "启用功能的群号白名单 (⚠️必须配置否则不工作)",
+    "items": {
+      "type": "string"
+    },
+    "default": []
+  },
+  "user_blacklist": {
+    "type": "list",
+    "description": "不发送祝福的用户QQ号黑名单",
+    "items": {
+      "type": "string"
+    },
+    "default": []
+  },
+  "scan_interval": {
+    "type": "float",
+    "description": "管理员扫描群成员时的请求间隔(秒)",
+    "default": 3.0,
+    "hint": "设太短可能会导致 Bot 账号被风控"
+  },
+  "birthday_prompt": {
+    "type": "text",
+    "description": "生日祝福提示词模板",
+    "default": "今天是{date}，是群友【{name}】的生日。请你用幽默风趣、符合你人设的语气写一段简短的生日祝福（60字以内）。",
+    "hint": "{date}会被替换为日期，{name}会被替换为昵称列表"
+  },
+  "anniversary_prompt": {
+    "type": "text",
+    "description": "纪念日祝福提示词模板",
+    "default": "今天是{date}，是本群的纪念日：【{event_name}】。请你为此写一段庆祝语，风格热烈。",
+    "hint": "{event_name}会被替换为纪念日名称"
+  }
+}
