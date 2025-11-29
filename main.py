@@ -10,7 +10,7 @@ from astrbot.api.message_components import At, Plain
 
 DATA_FILE = "birthday_data.json"
 
-@register("astrbot_plugin_birthday", "pigman02", "智能生日纪念日祝福", "1.3.2")
+@register("astrbot_plugin_birthday", "Zhalslar_Assistant", "智能生日纪念日祝福", "1.4.0")
 class BirthdayPlugin(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
@@ -63,7 +63,6 @@ class BirthdayPlugin(Star):
             logger.error(f"[BirthdayPlugin] Save data failed: {e}")
 
     def _add_birthday_record(self, user_id, group_id, date, name):
-        # 逻辑：先过滤掉该用户在该群的旧记录（实现覆盖更新）
         self.data["birthdays"] = [
             x for x in self.data["birthdays"] 
             if not (x["user_id"] == user_id and x["group_id"] == group_id)
@@ -189,16 +188,12 @@ class BirthdayPlugin(Star):
             yield event.plain_result("请在群聊中使用此指令。")
             return
 
-        # 记录原始长度
         original_len = len(self.data["birthdays"])
-        
-        # 过滤掉该用户在该群的记录
         self.data["birthdays"] = [
             x for x in self.data["birthdays"] 
             if not (x["user_id"] == user_id and x["group_id"] == group_id)
         ]
         
-        # 检查长度是否变化
         if len(self.data["birthdays"]) < original_len:
             self._save_data()
             yield event.plain_result("🗑️ 已删除你在本群的生日记录。")
@@ -258,6 +253,42 @@ class BirthdayPlugin(Star):
             yield event.plain_result("本群暂无记录。")
         else:
             yield event.plain_result("\n".join(msg))
+
+    @bd.command("test")
+    async def test_blessing(self, event: AstrMessageEvent, type: str = "bd"):
+        """测试祝福生成 /bd test [bd/ann]"""
+        user_id = event.get_sender_id()
+        name = event.get_sender_name()
+        group_id = event.get_group_id()
+        
+        if not group_id:
+            yield event.plain_result("⚠️ 请在群聊中进行测试。")
+            return
+
+        yield event.plain_result(f"🚀 正在为群 {group_id} 触发 {type} 祝福测试，请查看日志或等待消息...")
+        
+        provider = self.context.get_using_provider()
+        if not provider:
+            yield event.plain_result("❌ 未找到可用的 LLM 提供商，无法生成祝福。")
+            return
+
+        if type == "ann":
+            # 测试纪念日
+            fake_data = {
+                "group_id": group_id,
+                "date": "01-01",
+                "name": "测试纪念日",
+                "desc": "这是一个用于调试功能的虚拟节日"
+            }
+            await self._send_anniversary(provider, fake_data)
+        else:
+            # 测试生日
+            fake_user = {
+                "user_id": user_id,
+                "name": name,
+                "date": "01-01"
+            }
+            await self._send_batch_birthday(provider, group_id, [fake_user])
 
     # ================== 定时任务与发送逻辑 ==================
 
@@ -329,7 +360,8 @@ class BirthdayPlugin(Star):
                 user_prompt += f"\n(注意：今天共有 {len(user_list)} 位群友同一天过生日，请在祝福中体现出“双喜临门”或“集体庆生”的热闹氛围。)"
 
             umo = f"aiocqhttp:group_message:{group_id}"
-            persona = self.context.persona_manager.get_default_persona_v3(umo)
+            # [Fix]: 添加 await
+            persona = await self.context.persona_manager.get_default_persona_v3(umo)
             system_prompt = persona.system_prompt if persona else ""
 
             logger.info(f"[Birthday] Generating batch wish for group {group_id}, users: {names_str}")
@@ -366,7 +398,8 @@ class BirthdayPlugin(Star):
             user_prompt = f"{context_desc}\n{base_tmpl}".replace("{date}", data["date"]).replace("{event_name}", data["name"])
 
             umo = f"aiocqhttp:group_message:{data['group_id']}"
-            persona = self.context.persona_manager.get_default_persona_v3(umo)
+            # [Fix]: 添加 await
+            persona = await self.context.persona_manager.get_default_persona_v3(umo)
             system_prompt = persona.system_prompt if persona else ""
 
             resp = await provider.text_chat(
