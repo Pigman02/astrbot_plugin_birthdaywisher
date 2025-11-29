@@ -10,7 +10,7 @@ from astrbot.api.message_components import At, Plain
 
 DATA_FILE = "birthday_data.json"
 
-@register("astrbot_plugin_birthday", "Zhalslar_Assistant", "智能生日纪念日祝福", "1.6.0")
+@register("astrbot_plugin_birthday", "Zhalslar_Assistant", "智能生日纪念日祝福", "1.6.1")
 class BirthdayPlugin(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
@@ -70,7 +70,7 @@ class BirthdayPlugin(Star):
         })
         self._save_data()
 
-    # ================== 辅助函数 (防御性极强版) ==================
+    # ================== 辅助函数 ==================
     
     async def _get_stranger_info(self, client, user_id):
         try:
@@ -80,39 +80,30 @@ class BirthdayPlugin(Star):
             return None
 
     async def _get_system_prompt(self, group_id):
-        """
-        [调试版] 获取群组人设
-        强制打印类型，绝对防止报错
-        """
+        """获取群组人设 (防御性版)"""
         try:
-            umo = f"aiocqhttp:group_message:{group_id}"
+            # UMO 必须使用大写 GROUP_MESSAGE
+            umo = f"aiocqhttp:GROUP_MESSAGE:{group_id}"
             persona = await self.context.persona_manager.get_default_persona_v3(umo)
             
             if not persona:
                 return ""
             
-            # --- DEBUG LOG: 看看这到底是个什么东西 ---
-            logger.debug(f"[Birthday] Persona Type: {type(persona)}")
-            logger.debug(f"[Birthday] Persona Content: {persona}")
-            # ---------------------------------------
-
-            # 1. 优先尝试作为属性访问 (Object)
+            # 兼容对象和字典
             if hasattr(persona, "system_prompt"):
                 return persona.system_prompt
-            
-            # 2. 尝试作为字典访问 (Dict)
             if isinstance(persona, dict):
                 return persona.get("system_prompt", "")
-            
-            # 3. 如果都不是，返回空字符串，防止报错
-            logger.warning(f"[Birthday] Persona object is neither Dict nor Object with system_prompt!")
             return ""
             
         except Exception as e:
-            logger.error(f"[Birthday] Get persona FATAL error: {e}")
+            logger.error(f"[Birthday] Get persona error: {e}")
             return ""
 
     async def _send_to_platform(self, group_id, chain):
+        """
+        [关键修复] 使用大写 GROUP_MESSAGE
+        """
         try:
             platform = self.context.get_platform("aiocqhttp")
             if not platform: return
@@ -121,7 +112,10 @@ class BirthdayPlugin(Star):
             if callable(meta): meta = meta()
             
             p_name = getattr(meta, "name", "aiocqhttp")
-            target_umo = f"{p_name}:group_message:{group_id}"
+            
+            # [Fix]: 这里的 MessageType 必须是大写 GROUP_MESSAGE
+            target_umo = f"{p_name}:GROUP_MESSAGE:{group_id}"
+            
             await self.context.send_message(target_umo, chain)
             
         except Exception as e:
@@ -253,6 +247,9 @@ class BirthdayPlugin(Star):
         
         yield event.plain_result(f"🚀 测试 {type} 祝福...")
         provider = self.context.get_using_provider()
+        if not provider:
+            yield event.plain_result("❌ 无可用 LLM。")
+            return
         
         if type == "ann":
             await self._send_anniversary(provider, {"group_id": gid, "date": "01-01", "name": "测试日", "desc": "测试"})
