@@ -10,38 +10,33 @@ from astrbot.api.message_components import At, Plain
 
 DATA_FILE = "birthday_data.json"
 
-@register("astrbot_plugin_birthday", "Zhalslar_Assistant", "智能生日纪念日祝福", "1.2.1")
+@register("astrbot_plugin_birthday", "pigman02", "智能生日纪念日祝福", "1.3.2")
 class BirthdayPlugin(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
         self.config = config
         
-        # 数据存储路径
+        # 使用规范的数据存储目录 data/plugin_data/astrbot_plugin_birthday/
         self.data_dir = StarTools.get_data_dir("astrbot_plugin_birthday")
         self.data_path = self.data_dir / DATA_FILE
         
         self.data = self._load_data()
         self.last_check_date = None
         
-        # [改进1] 将任务句柄保存在实例变量中，以便后续取消
+        # 将任务句柄保存在实例变量中
         self._task = asyncio.create_task(self._scheduler_loop())
 
-    # [改进2] 实现 terminate 方法，这是 AstrBot 卸载/重载插件时自动调用的生命周期函数
     async def terminate(self):
         """插件卸载/重载时的清理逻辑"""
         logger.info("[BirthdayPlugin] Terminating plugin...")
-        
-        # 如果任务还在运行，取消它
         if self._task and not self._task.done():
             self._task.cancel()
             try:
-                # 等待任务响应取消信号，避免“Task was destroyed but it is pending”警告
                 await self._task
             except asyncio.CancelledError:
                 logger.info("[BirthdayPlugin] Scheduler task cancelled successfully.")
             except Exception as e:
                 logger.error(f"[BirthdayPlugin] Error during task cancellation: {e}")
-        
         logger.info("[BirthdayPlugin] Plugin terminated.")
 
     # ================== 数据存储管理 ==================
@@ -68,6 +63,7 @@ class BirthdayPlugin(Star):
             logger.error(f"[BirthdayPlugin] Save data failed: {e}")
 
     def _add_birthday_record(self, user_id, group_id, date, name):
+        # 逻辑：先过滤掉该用户在该群的旧记录（实现覆盖更新）
         self.data["birthdays"] = [
             x for x in self.data["birthdays"] 
             if not (x["user_id"] == user_id and x["group_id"] == group_id)
@@ -89,23 +85,24 @@ class BirthdayPlugin(Star):
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @bd.command("scan")
-    async def scan_group(self, event: AstrMessageEvent):
-        """(仅管理员) 扫描当前群成员资料自动登记生日"""
+    async def scan_group(self, event: AstrMessageEvent, group_id: str = None):
+        """(仅管理员) 扫描群成员资料自动登记生日"""
         if not isinstance(event, AiocqhttpMessageEvent):
             yield event.plain_result("❌ 此功能仅支持 QQ (Aiocqhttp) 适配器。")
             return
 
-        group_id = event.get_group_id()
-        if not group_id:
-            yield event.plain_result("请在群聊中使用。")
+        target_group = group_id if group_id else event.get_group_id()
+
+        if not target_group:
+            yield event.plain_result("❌ 未检测到群号。私聊请指定群号: /bd scan [群号]")
             return
 
         interval = self.config.get("scan_interval", 3.0)
-        yield event.plain_result(f"⏳ 开始扫描群 {group_id} 成员资料，间隔 {interval}秒/人，请耐心等待...")
+        yield event.plain_result(f"⏳ 开始扫描群 {target_group} 成员资料，间隔 {interval}秒/人，请耐心等待...")
         
         client = event.bot
         try:
-            member_list = await client.get_group_member_list(group_id=int(group_id))
+            member_list = await client.get_group_member_list(group_id=int(target_group))
             count = 0
             
             for member in member_list:
@@ -119,9 +116,9 @@ class BirthdayPlugin(Star):
                     
                     if m and d:
                         date_str = f"{m:02d}-{d:02d}"
-                        self._add_birthday_record(user_id, str(group_id), date_str, nickname)
+                        self._add_birthday_record(user_id, str(target_group), date_str, nickname)
                         count += 1
-                        logger.info(f"[Birthday] Scanned: {nickname}({user_id}) -> {date_str}")
+                        logger.info(f"[Birthday] Scanned: {nickname}({user_id}) -> {date_str} @ Group {target_group}")
                     
                 except Exception:
                     pass
@@ -135,44 +132,78 @@ class BirthdayPlugin(Star):
             yield event.plain_result(f"❌ 扫描过程中发生错误: {e}")
 
     @bd.command("add")
-    async def add_birthday(self, event: AstrMessageEvent, date: str = None, user_id: str = None):
-        """添加生日 /bd add [date] [user_id]"""
+    async def add_birthday(self, event: AstrMessageEvent, date: str = None, user_id: str = None, group_id: str = None):
+        """添加生日 /bd add [date] [qq] [group]"""
         target_id = user_id if user_id else event.get_sender_id()
-        target_name = event.get_sender_name()
+        if not user_id:
+            target_name = event.get_sender_name()
+        else:
+            target_name = user_id 
+
+        target_group = group_id if group_id else event.get_group_id()
+
+        if not target_group:
+            yield event.plain_result("❌ 未检测到群号。私聊请指定群号: /bd add 日期 QQ号 群号")
+            return
+
+        # --- 情况1: 自动拉取 ---
+        if not date:
+            if not isinstance(event, AiocqhttpMessageEvent):
+                yield event.plain_result("自动拉取仅支持 QQ 适配器，请手动输入: /bd add MM-DD")
+                return
+
+            yield event.plain_result(f"🔍 正在获取 {target_id} 的公开资料...")
+            try:
+                client = event.bot
+                info = await client.get_stranger_info(user_id=int(target_id), no_cache=True)
+                m = info.get("birthday_month")
+                d = info.get("birthday_day")
+                
+                fetched_name = info.get('nickname', target_name)
+
+                if m and d:
+                    date_str = f"{m:02d}-{d:02d}"
+                    self._add_birthday_record(target_id, target_group, date_str, fetched_name)
+                    yield event.plain_result(f"🎉 获取成功！已将 {fetched_name}({target_id}) 的生日 {date_str} 添加到群 {target_group}")
+                else:
+                    yield event.plain_result("⚠️ 获取失败：资料未设置生日或仅自己可见。\n请手动添加: /bd add MM-DD")
+            except Exception as e:
+                yield event.plain_result(f"❌ 获取资料出错: {e}")
+            return
+
+        # --- 情况2/3/4: 手动输入 ---
+        try:
+            datetime.datetime.strptime(date, "%m-%d")
+            self._add_birthday_record(target_id, target_group, date, target_name)
+            yield event.plain_result(f"✅ 已将 {target_id} 的生日 {date} 添加到群 {target_group}")
+        except ValueError:
+            yield event.plain_result("❌ 日期格式错误，请使用 MM-DD (例如 01-01)")
+
+    @bd.command("del")
+    async def del_birthday(self, event: AstrMessageEvent):
+        """删除自己的生日记录"""
+        user_id = event.get_sender_id()
         group_id = event.get_group_id()
 
         if not group_id:
             yield event.plain_result("请在群聊中使用此指令。")
             return
 
-        if not date:
-            if not isinstance(event, AiocqhttpMessageEvent):
-                yield event.plain_result("自动拉取仅支持 QQ 适配器，请手动输入: /bd add MM-DD")
-                return
-
-            yield event.plain_result(f"🔍 正在获取 {target_name} 的公开资料...")
-            try:
-                client = event.bot
-                info = await client.get_stranger_info(user_id=int(target_id), no_cache=True)
-                m = info.get("birthday_month")
-                d = info.get("birthday_day")
-
-                if m and d:
-                    date_str = f"{m:02d}-{d:02d}"
-                    self._add_birthday_record(target_id, group_id, date_str, target_name)
-                    yield event.plain_result(f"🎉 获取成功！已记录你的生日: {date_str}")
-                else:
-                    yield event.plain_result("⚠️ 获取失败：你的QQ资料未设置生日或仅自己可见。\n请手动添加: /bd add MM-DD")
-            except Exception as e:
-                yield event.plain_result(f"❌ 获取资料出错，请手动添加: /bd add MM-DD")
-            return
-
-        try:
-            datetime.datetime.strptime(date, "%m-%d")
-            self._add_birthday_record(target_id, group_id, date, target_name)
-            yield event.plain_result(f"✅ 已记录 {target_name} 的生日: {date}")
-        except ValueError:
-            yield event.plain_result("❌ 日期格式错误，请使用 MM-DD (例如 01-01)")
+        # 记录原始长度
+        original_len = len(self.data["birthdays"])
+        
+        # 过滤掉该用户在该群的记录
+        self.data["birthdays"] = [
+            x for x in self.data["birthdays"] 
+            if not (x["user_id"] == user_id and x["group_id"] == group_id)
+        ]
+        
+        # 检查长度是否变化
+        if len(self.data["birthdays"]) < original_len:
+            self._save_data()
+            yield event.plain_result("🗑️ 已删除你在本群的生日记录。")
+        else:
+            yield event.plain_result("⚠️ 未找到你在本群的生日记录。")
 
     @bd.command("add_ann")
     async def add_ann(self, event: AstrMessageEvent, date: str, name: str, desc: str = ""):
@@ -185,6 +216,10 @@ class BirthdayPlugin(Star):
                 "name": name,
                 "desc": desc
             }
+            if not record["group_id"]:
+                 yield event.plain_result("❌ 请在群聊中添加纪念日。")
+                 return
+
             self.data["anniversaries"].append(record)
             self._save_data()
             
@@ -199,6 +234,10 @@ class BirthdayPlugin(Star):
     async def list_all(self, event: AstrMessageEvent):
         """查看本群记录清单"""
         gid = event.get_group_id()
+        if not gid:
+            yield event.plain_result("请在群聊中使用此指令查看该群列表。")
+            return
+
         whitelist = self.config.get("group_whitelist", [])
         if gid not in whitelist:
             yield event.plain_result("⚠️ 本群未在配置白名单中，请联系管理员在 WebUI 添加，否则无法自动提醒。")
@@ -238,10 +277,8 @@ class BirthdayPlugin(Star):
                     await self._check_and_send(date_str)
                     self.last_check_date = date_str
                 
-                # 每 60 秒检查一次
                 await asyncio.sleep(60)
         except asyncio.CancelledError:
-            # [改进3] 捕获取消异常，优雅退出循环
             logger.info("[BirthdayPlugin] Scheduler loop stopping due to cancellation.")
             raise
         except Exception as e:
